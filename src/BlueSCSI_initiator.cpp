@@ -54,7 +54,7 @@ static struct {
 
     // Is imaging a drive in progress, or are we scanning?
     bool imaging;
-
+    bool audioMode;
     // Information about currently selected drive
     int target_id;
     uint32_t sectorsize;
@@ -94,6 +94,7 @@ void scsiInitiatorInit()
     }
     g_initiator_state.maxRetryCount = ini_getl("SCSI", "InitiatorMaxRetry", 5, CONFIGFILE);
 
+    g_initiator_state.audioMode = ini_getbool("SCSI", "AudioMode", 0, CONFIGFILE);
     // treat initiator id as already imaged drive so it gets skipped
     g_initiator_state.drives_imaged = 1 << g_initiator_state.initiator_id;
     g_initiator_state.imaging = false;
@@ -291,6 +292,14 @@ void scsiInitiatorMainLoop()
 
                 log("Starting to copy drive data to ", filename);
                 g_initiator_state.imaging = true;
+
+                int Mode = -1;
+                if(g_initiator_state.audioMode) BLUESCSI_SetMode(AUDIO_MODE, g_initiator_state.target_id);
+                else                            BLUESCSI_SetMode(DATA_MODE,  g_initiator_state.target_id);
+                
+                BLUESCSI_GetMode(&Mode, g_initiator_state.target_id);
+                if(Mode == AUDIO_MODE) log("The SCSI is in Audio Mode");
+                if(Mode == DATA_MODE) log("The SCSI is in Data Mode");
             }
         }
     }
@@ -336,9 +345,24 @@ void scsiInitiatorMainLoop()
             numtoread = 1;
 
         uint32_t time_start = millis();
-        bool status = scsiInitiatorReadDataToFile(g_initiator_state.target_id,
-            g_initiator_state.sectors_done, numtoread, g_initiator_state.sectorsize,
-            g_initiator_state.target_file);
+
+        bool status = false;
+
+        if(g_initiator_state.audioMode)
+        {
+            status = scsiInitiatorReadDataToFile(g_initiator_state.target_id,
+                g_initiator_state.sectors_done, 1, (uint16_t)ini_getl("SCSI", "AudioFrameSize", 5822, "bluescsi.ini"),
+                g_initiator_state.target_file);
+        }
+        else
+        {
+            status = scsiInitiatorReadDataToFile(g_initiator_state.target_id,
+                g_initiator_state.sectors_done, numtoread, g_initiator_state.sectorsize,
+                g_initiator_state.target_file);
+        }
+
+
+
 
         if (!status)
         {
@@ -729,17 +753,25 @@ bool scsiInitiatorReadDataToFile(int target_id, uint32_t start_sector, uint32_t 
     // ref: https://www.seagate.com/files/staticfiles/support/docs/manual/Interface%20manuals/100293068j.pdf pg 134
     if (g_initiator_state.ansiVersion < 0x02 || (start_sector < 0x1FFFFF && sectorcount <= 256))
     {
+        uint8_t command[6] = {0x08, 0, 0, 0, 0, 0};
+
+        if(g_initiator_state.audioMode){
+            command[2] = (uint8_t) (sectorsize >> 16);;
+            command[3] = (uint8_t) (sectorsize >> 8);
+        }
+        else{
         // Use READ6 command for compatibility with old SCSI1 drives
-        uint8_t command[6] = {0x08,
-            (uint8_t)(start_sector >> 16),
-            (uint8_t)(start_sector >> 8),
-            (uint8_t)start_sector,
-            (uint8_t)sectorcount,
-            0x00
-        };
+            command[1] = (uint8_t)(start_sector >> 16);
+            command[2] = (uint8_t)(start_sector >> 8);
+            command[3] = (uint8_t)start_sector;
+            command[4] = (uint8_t)sectorcount;
+        }
 
         // Start executing command, return in data phase
-        status = scsiInitiatorRunCommand(target_id, command, sizeof(command), NULL, 0, NULL, 0, true);
+        status = scsiInitiatorRunCommand(target_id, command, sizeof(command),   
+                                                    NULL, 0, 
+                                                    NULL, 0,
+                                                    true);
     }
     else
     {
